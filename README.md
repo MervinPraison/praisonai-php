@@ -5,7 +5,7 @@ PraisonAI is a production-ready Multi AI Agents framework for PHP, designed to c
 ## Installation
 
 ```bash
-composer require praisonai/praisonai
+composer require mervinpraison/praisonai
 ```
 
 ## Quick Start
