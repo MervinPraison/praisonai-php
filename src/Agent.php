@@ -90,14 +90,14 @@ class Agent
 
         $choice = $response->choices[0];
 
-        // Handle tool calls
+        // Handle tool calls (with multi-step loop)
         if (isset($choice->message->toolCalls) && !empty($choice->message->toolCalls)) {
-            return $this->handleToolCalls($choice->message->toolCalls, $messages);
+            $content = $this->handleToolCalls($choice->message->toolCalls, $messages);
+        } else {
+            $content = $choice->message->content ?? '';
         }
 
-        $content = $choice->message->content ?? '';
-
-        // Store in history
+        // Always store in history — regardless of whether tools were used
         $this->conversationHistory[] = ['role' => 'user', 'content' => $message];
         $this->conversationHistory[] = ['role' => 'assistant', 'content' => $content];
 
@@ -186,55 +186,76 @@ class Agent
 
     /**
      * Handle tool calls from the LLM response.
+     * Supports multi-step: if the LLM's follow-up response requests
+     * more tool calls, we loop (up to $maxIterations rounds).
      *
      * @param array $toolCalls
      * @param array $messages
      */
-    private function handleToolCalls(array $toolCalls, array $messages): string
+    private function handleToolCalls(array $toolCalls, array $messages, int $maxIterations = 5): string
     {
-        // Add the assistant message with tool calls
-        $messages[] = [
-            'role' => 'assistant',
-            'content' => null,
-            'tool_calls' => array_map(fn($tc) => [
-                'id' => $tc->id,
-                'type' => 'function',
-                'function' => [
-                    'name' => $tc->function->name,
-                    'arguments' => $tc->function->arguments,
-                ],
-            ], $toolCalls),
-        ];
+        for ($i = 0; $i < $maxIterations; $i++) {
+            // Add the assistant message with tool calls
+            $messages[] = [
+                'role' => 'assistant',
+                'content' => null,
+                'tool_calls' => array_map(fn($tc) => [
+                    'id' => $tc->id,
+                    'type' => 'function',
+                    'function' => [
+                        'name' => $tc->function->name,
+                        'arguments' => $tc->function->arguments,
+                    ],
+                ], $toolCalls),
+            ];
 
-        // Execute each tool call
-        foreach ($toolCalls as $toolCall) {
-            $functionName = $toolCall->function->name;
-            $arguments = json_decode($toolCall->function->arguments, true) ?? [];
+            // Execute each tool call
+            foreach ($toolCalls as $toolCall) {
+                $functionName = $toolCall->function->name;
+                $arguments = json_decode($toolCall->function->arguments, true) ?? [];
 
-            $tool = $this->findTool($functionName);
-            if ($tool !== null) {
-                if ($this->verbose) {
-                    echo "[{$this->name}] Calling tool: {$functionName}\n";
+                $tool = $this->findTool($functionName);
+                if ($tool !== null) {
+                    if ($this->verbose) {
+                        echo "[{$this->name}] Calling tool: {$functionName}\n";
+                    }
+                    $result = $tool->execute($arguments);
+                } else {
+                    $result = "Error: Tool '{$functionName}' not found.";
                 }
-                $result = $tool->execute($arguments);
-            } else {
-                $result = "Error: Tool '{$functionName}' not found.";
+
+                $messages[] = [
+                    'role' => 'tool',
+                    'tool_call_id' => $toolCall->id,
+                    'content' => $result,
+                ];
             }
 
-            $messages[] = [
-                'role' => 'tool',
-                'tool_call_id' => $toolCall->id,
-                'content' => $result,
+            // Send back to LLM with tool results
+            $params = [
+                'model' => $this->model,
+                'messages' => $messages,
             ];
+
+            if (!empty($this->tools)) {
+                $params['tools'] = array_map(fn(Tool $t) => $t->toOpenAI(), $this->tools);
+            }
+
+            $response = $this->client->chat()->create($params);
+            $choice = $response->choices[0];
+
+            // If LLM wants more tool calls, loop
+            if (isset($choice->message->toolCalls) && !empty($choice->message->toolCalls)) {
+                $toolCalls = $choice->message->toolCalls;
+                continue;
+            }
+
+            // LLM returned a final text response
+            return $choice->message->content ?? '';
         }
 
-        // Send back to LLM with tool results
-        $response = $this->client->chat()->create([
-            'model' => $this->model,
-            'messages' => $messages,
-        ]);
-
-        return $response->choices[0]->message->content ?? '';
+        // Max iterations reached — return whatever we have
+        return 'I was unable to complete the request after multiple tool calls. Please try again.';
     }
 
     /**
