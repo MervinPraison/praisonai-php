@@ -136,6 +136,27 @@ class Agent
     }
 
     /**
+     * Set conversation history (e.g. from a previous session).
+     *
+     * @param array<array{role: string, content: string}> $history
+     */
+    public function setHistory(array $history): self
+    {
+        $this->conversationHistory = $history;
+        return $this;
+    }
+
+    /**
+     * Get current conversation history.
+     *
+     * @return array<array{role: string, content: string}>
+     */
+    public function getHistory(): array
+    {
+        return $this->conversationHistory;
+    }
+
+    /**
      * Clear conversation history.
      */
     public function clearHistory(): void
